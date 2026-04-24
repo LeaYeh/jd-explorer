@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JD Explorer</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <h1>JD Explorer</h1>
+      <p>Paste your CV URL and job portals — get fit scores, CV tips, and salary info.</p>
+    </div>
+  </header>
+
+  <main>
+    <div class="card">
+      <h2>Your CV</h2>
+      <div class="input-row">
+        <input id="cv-input" type="url" placeholder="https://your-cv-link.com (Google Doc, PDF, or any URL)" />
+        <button id="set-cv-btn" class="btn-primary">Set CV</button>
+      </div>
+      <div id="cv-status" class="cv-status"></div>
+    </div>
+
+    <div class="card">
+      <h2>Job Portals to Monitor</h2>
+      <div class="input-row">
+        <input id="portal-input" type="url" placeholder="https://company.com/careers" />
+        <button id="add-portal-btn" class="btn-ghost">Add</button>
+      </div>
+      <div id="portal-list" class="portal-list"></div>
+    </div>
+
+    <div class="analyze-bar">
+      <button id="analyze-btn" class="btn-primary" disabled>Analyze All</button>
+      <span id="status"></span>
+    </div>
+
+    <div id="results"></div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
