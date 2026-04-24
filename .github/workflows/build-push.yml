@@ -46,11 +46,14 @@ jobs:
       - name: Bump image tag in lyeh-infra
         run: |
           IMAGE="${{ env.IMAGE }}:sha-${{ github.sha }}"
-          sed -i "s|image: .*jd-explorer.*|image: $IMAGE|" \
+          # Match any image: line in the deployment (works regardless of current image)
+          sed -i "s|image: .*|image: $IMAGE|" \
             lyeh-infra/apps/jd-explorer/deployment.yaml
           cd lyeh-infra
           git config user.email "ci@lyeh.dev"
           git config user.name "CI Bot"
           git add apps/jd-explorer/deployment.yaml
+          # Skip commit if image tag is already up to date
+          git diff --cached --quiet && echo "Already up to date, skipping." && exit 0
           git commit -m "chore(jd-explorer): bump image to sha-${{ github.sha }}"
           git push
