@@ -13,6 +13,15 @@ _client = anthropic.AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", "
 
 _JSON_ONLY = "Return ONLY valid JSON, no markdown, no explanation."
 
+
+def _parse_json(raw: str) -> dict | list:
+    text = raw.strip()
+    if text.startswith("```"):
+        # strip ```json ... ``` wrapper
+        lines = text.splitlines()
+        text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+    return json.loads(text.strip())
+
 _ANALYZE_SYSTEM = (
     "You are a career advisor. Analyze a job description and evaluate fit with a candidate's CV. "
     + _JSON_ONLY
@@ -132,7 +141,7 @@ Return JSON: {{"job_links": [{{"url": "...", "title": "..."}}]}}"""
     raw = msg.content[0].text
     log.info("[llm] _extract_job_links raw response: %s", raw[:300])
     try:
-        data = json.loads(raw)
+        data = _parse_json(raw)
         return data.get("job_links", []), prompt, raw
     except json.JSONDecodeError as e:
         log.error("[llm] failed to parse job links JSON: %s | raw: %s", e, raw[:300])
@@ -171,7 +180,7 @@ Return JSON:
     )
     raw = msg.content[0].text
     try:
-        return json.loads(raw), prompt, raw
+        return _parse_json(raw), prompt, raw
     except json.JSONDecodeError as e:
         log.error("[llm] failed to parse single JD JSON: %s | raw: %s", e, raw[:300])
         return None, prompt, raw
@@ -209,7 +218,7 @@ If no listings found, return {{"jobs": []}}."""
     )
     raw = msg.content[0].text
     try:
-        data = json.loads(raw)
+        data = _parse_json(raw)
         jobs = data.get("jobs", [])
         log.info("[llm] fallback extracted %d jobs from listing page", len(jobs))
         return jobs, prompt, raw
