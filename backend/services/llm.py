@@ -1,8 +1,13 @@
-import anthropic
 import json
+import logging
 import os
 from typing import List, Dict
+
+import anthropic
+
 from backend.services.scraper import fetch_page_text, fetch_all_links
+
+log = logging.getLogger(__name__)
 
 _client = anthropic.AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
@@ -14,37 +19,86 @@ _ANALYZE_SYSTEM = (
 )
 
 
-async def analyze_portals(cv_url: str, portal_urls: List[str]) -> List[Dict]:
+async def analyze_portals_stream(cv_url: str, portal_urls: List[str]):
+    """Async generator — yields SSE event dicts for real-time progress."""
+    yield {"type": "progress", "message": "Loading CV..."}
     cv_text = await fetch_page_text(cv_url, max_chars=4000)
+    word_count = len(cv_text.split())
+    if word_count < 20:
+        yield {"type": "error", "message": "Could not read CV — make sure the URL is publicly accessible"}
+        return
+    yield {"type": "progress", "message": f"CV loaded ({word_count} words)"}
+
+    for portal_url in portal_urls:
+        yield {"type": "progress", "message": f"Scanning portal..."}
+
+        all_links = await fetch_all_links(portal_url)
+        yield {"type": "progress", "message": f"Found {len(all_links)} candidate links — filtering with LLM..."}
+
+        job_links = await _extract_job_links(all_links, portal_url) if all_links else []
+        yield {"type": "progress", "message": f"Identified {len(job_links)} job pages"}
+
+        if job_links:
+            total = min(len(job_links), 15)
+            for i, link in enumerate(job_links[:total]):
+                yield {"type": "progress", "message": f"Analyzing {i + 1}/{total}: {link['title'][:60]}"}
+                jd_text = await fetch_page_text(link["url"])
+                job = await _analyze_single_jd(cv_text, link["title"], link["url"], jd_text)
+                if job:
+                    job["portal_url"] = portal_url
+                    yield {"type": "job", "data": job}
+                else:
+                    yield {"type": "progress", "message": f"  skipped (could not parse LLM response)"}
+        else:
+            yield {"type": "progress", "message": "No job links found — analyzing listing page text directly..."}
+            portal_text = await fetch_page_text(portal_url)
+            jobs = await _analyze_listing_fallback(cv_text, portal_url, portal_text)
+            for job in jobs:
+                job["portal_url"] = portal_url
+                yield {"type": "job", "data": job}
+
+    yield {"type": "done"}
+
+
+async def analyze_portals(cv_url: str, portal_urls: List[str]) -> List[Dict]:
+    log.info("[llm] fetching CV from %s", cv_url)
+    cv_text = await fetch_page_text(cv_url, max_chars=4000)
+    log.info("[llm] CV text: %d words", len(cv_text.split()))
+
     results = []
     for url in portal_urls:
+        log.info("[llm] starting analysis for portal: %s", url)
         jobs = await _analyze_portal(cv_text, url)
+        log.info("[llm] portal %s → %d jobs analyzed", url, len(jobs))
         results.append({"portal_url": url, "jobs": jobs})
     return results
 
 
 async def _analyze_portal(cv_text: str, portal_url: str) -> List[Dict]:
-    # Phase 1: collect all same-domain links, let LLM decide which are job pages
     all_links = await fetch_all_links(portal_url)
     job_links = await _extract_job_links(all_links, portal_url) if all_links else []
+    log.info("[llm] LLM identified %d job links out of %d candidates", len(job_links), len(all_links))
 
     if job_links:
-        # Phase 2: fetch + analyze each job detail page
         jobs = []
-        for link in job_links[:15]:
+        for i, link in enumerate(job_links[:15]):
+            log.info("[llm] fetching JD %d/%d: %s", i + 1, min(len(job_links), 15), link["url"])
             jd_text = await fetch_page_text(link["url"])
+            log.info("[llm] JD text: %d words", len(jd_text.split()))
             job = await _analyze_single_jd(cv_text, link["title"], link["url"], jd_text)
             if job:
+                log.info("[llm] analyzed: %s → fit_score=%s", job.get("title"), job.get("fit_score"))
                 jobs.append(job)
+            else:
+                log.warning("[llm] failed to parse LLM response for %s", link["url"])
         return jobs
 
-    # Fallback: no navigable job links, analyze listing page text directly
+    log.info("[llm] no job links found, falling back to listing page text")
     portal_text = await fetch_page_text(portal_url)
     return await _analyze_listing_fallback(cv_text, portal_url, portal_text)
 
 
 async def _extract_job_links(links: list[dict], portal_url: str) -> list[dict]:
-    """Ask LLM to identify which links are individual job detail pages."""
     links_text = "\n".join(f"- [{l['title']}]({l['url']})" for l in links)
 
     prompt = f"""These links were extracted from a job portal listing page: {portal_url}
@@ -62,15 +116,18 @@ Return JSON: {{"job_links": [{{"url": "...", "title": "..."}}]}}"""
         messages=[{"role": "user", "content": prompt}],
     )
     raw = msg.content[0].text
+    log.info("[llm] _extract_job_links raw response: %s", raw[:300])
     try:
         data = json.loads(raw)
         return data.get("job_links", [])
-    except (json.JSONDecodeError, IndexError):
+    except json.JSONDecodeError as e:
+        log.error("[llm] failed to parse job links JSON: %s | raw: %s", e, raw[:300])
         return []
 
 
 async def _analyze_single_jd(cv_text: str, title: str, url: str, jd_text: str) -> Dict | None:
     if not jd_text.strip():
+        log.warning("[llm] empty JD text for %s", url)
         return None
 
     prompt = f"""CV:
@@ -97,9 +154,11 @@ Return JSON:
         system=_ANALYZE_SYSTEM,
         messages=[{"role": "user", "content": prompt}],
     )
+    raw = msg.content[0].text
     try:
-        return json.loads(msg.content[0].text)
-    except (json.JSONDecodeError, IndexError):
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        log.error("[llm] failed to parse single JD JSON: %s | raw: %s", e, raw[:300])
         return None
 
 
@@ -132,8 +191,12 @@ If no listings found, return {{"jobs": []}}."""
         system=_ANALYZE_SYSTEM,
         messages=[{"role": "user", "content": prompt}],
     )
+    raw = msg.content[0].text
     try:
-        data = json.loads(msg.content[0].text)
-        return data.get("jobs", [])
-    except (json.JSONDecodeError, IndexError):
+        data = json.loads(raw)
+        jobs = data.get("jobs", [])
+        log.info("[llm] fallback extracted %d jobs from listing page", len(jobs))
+        return jobs
+    except json.JSONDecodeError as e:
+        log.error("[llm] failed to parse fallback JSON: %s | raw: %s", e, raw[:300])
         return []

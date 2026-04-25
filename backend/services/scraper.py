@@ -1,6 +1,9 @@
+import logging
 import httpx
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
+
+log = logging.getLogger(__name__)
 
 _HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; JD-Explorer/1.0)"}
 _JS_THRESHOLD = 100
@@ -8,8 +11,13 @@ _JS_THRESHOLD = 100
 
 async def fetch_page_text(url: str, max_chars: int = 8000) -> str:
     text = await _fetch_httpx(url, max_chars)
-    if len(text.split()) < _JS_THRESHOLD:
+    word_count = len(text.split())
+    if word_count < _JS_THRESHOLD:
+        log.info("[scraper] httpx got %d words from %s — below threshold, trying Playwright", word_count, url)
         text = await _fetch_playwright_text(url, max_chars)
+        log.info("[scraper] Playwright got %d words from %s", len(text.split()), url)
+    else:
+        log.info("[scraper] httpx got %d words from %s", word_count, url)
     return text
 
 
@@ -17,8 +25,12 @@ async def fetch_all_links(portal_url: str) -> list[dict]:
     """Return all same-domain links from the listing page — no keyword filtering."""
     html = await _fetch_raw_html(portal_url)
     if len(html.split()) < _JS_THRESHOLD:
+        log.info("[scraper] listing page looks JS-rendered, switching to Playwright: %s", portal_url)
         html = await _fetch_playwright_html(portal_url)
-    return _extract_links(html, portal_url)
+
+    links = _extract_links(html, portal_url)
+    log.info("[scraper] extracted %d candidate links from %s", len(links), portal_url)
+    return links
 
 
 def _extract_links(html: str, base_url: str) -> list[dict]:
@@ -35,7 +47,7 @@ def _extract_links(html: str, base_url: str) -> list[dict]:
             continue
         seen.add(href)
         links.append({"url": href, "title": title[:120]})
-        if len(links) >= 60:  # cap before passing to LLM
+        if len(links) >= 60:
             break
 
     return links
@@ -47,7 +59,8 @@ async def _fetch_raw_html(url: str) -> str:
             resp = await client.get(url, headers=_HEADERS)
             resp.raise_for_status()
             return resp.text
-    except Exception:
+    except Exception as e:
+        log.warning("[scraper] httpx failed for %s: %s", url, e)
         return ""
 
 

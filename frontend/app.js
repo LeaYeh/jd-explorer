@@ -6,17 +6,15 @@ const cvStatus = document.getElementById("cv-status");
 const portalInput = document.getElementById("portal-input");
 const portalList = document.getElementById("portal-list");
 const analyzeBtn = document.getElementById("analyze-btn");
-const statusEl = document.getElementById("status");
+const progressPanel = document.getElementById("progress-panel");
+const progressLog = document.getElementById("progress-log");
 const resultsEl = document.getElementById("results");
 
 let portals = JSON.parse(localStorage.getItem(STORAGE_PORTALS) || "[]");
 
 function loadState() {
   const cv = localStorage.getItem(STORAGE_CV) || "";
-  if (cv) {
-    cvInput.value = cv;
-    setCvStatus(cv);
-  }
+  if (cv) { cvInput.value = cv; setCvStatus(cv); }
   renderPortals();
 }
 
@@ -70,30 +68,74 @@ function updateAnalyzeBtn() {
   analyzeBtn.disabled = !cv || !portals.length;
 }
 
+function addProgress(message, type = "") {
+  const entry = document.createElement("div");
+  entry.className = "progress-entry" + (type ? ` ${type}` : "");
+  entry.textContent = message;
+  progressLog.appendChild(entry);
+  progressLog.scrollTop = progressLog.scrollHeight;
+}
+
 async function analyze() {
   const cv_url = localStorage.getItem(STORAGE_CV);
   analyzeBtn.disabled = true;
-  statusEl.innerHTML = '<span class="spinner"></span>Fetching & analyzing...';
+
+  progressLog.innerHTML = "";
+  progressPanel.style.display = "block";
+  resultsEl.innerHTML = "";
   resultsEl.classList.remove("visible");
 
   try {
-    const resp = await fetch("/api/analyze", {
+    const resp = await fetch("/api/analyze/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ cv_url, portal_urls: portals }),
     });
+
     if (!resp.ok) {
       const err = await resp.json();
-      throw new Error(err.detail || resp.statusText);
+      addProgress(`Error: ${err.detail || resp.statusText}`, "error");
+      return;
     }
-    const data = await resp.json();
-    renderResults(data.results);
-    statusEl.textContent = `Done — ${data.results.reduce((s, r) => s + r.jobs.length, 0)} jobs analyzed.`;
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop(); // keep partial last line
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        try {
+          handleEvent(JSON.parse(line.slice(6)));
+        } catch (_) {}
+      }
+    }
   } catch (e) {
-    statusEl.textContent = `Error: ${e.message}`;
+    addProgress(`Network error: ${e.message}`, "error");
   } finally {
     analyzeBtn.disabled = false;
     updateAnalyzeBtn();
+  }
+}
+
+function handleEvent(event) {
+  if (event.type === "progress") {
+    addProgress(event.message);
+  } else if (event.type === "job") {
+    resultsEl.classList.add("visible");
+    resultsEl.appendChild(buildJobCard(event.data));
+  } else if (event.type === "done") {
+    const count = resultsEl.querySelectorAll(".job-card").length;
+    addProgress(`Done — ${count} job(s) analyzed`, "success");
+  } else if (event.type === "error") {
+    addProgress(`✗ ${event.message}`, "error");
   }
 }
 
@@ -101,25 +143,6 @@ function fitClass(score) {
   if (score >= 70) return "fit-high";
   if (score >= 40) return "fit-mid";
   return "fit-low";
-}
-
-function renderResults(results) {
-  resultsEl.innerHTML = "";
-  results.forEach(({ portal_url, jobs }) => {
-    const section = document.createElement("div");
-    section.className = "portal-section";
-    section.innerHTML = `<h3>${portal_url}</h3>`;
-
-    if (!jobs.length) {
-      section.innerHTML += '<p class="empty">No job listings found on this page.</p>';
-    } else {
-      jobs.forEach(job => {
-        section.appendChild(buildJobCard(job));
-      });
-    }
-    resultsEl.appendChild(section);
-  });
-  resultsEl.classList.add("visible");
 }
 
 function buildJobCard(job) {
@@ -155,10 +178,8 @@ function buildJobCard(job) {
 
 document.getElementById("set-cv-btn").addEventListener("click", saveCv);
 cvInput.addEventListener("keydown", e => e.key === "Enter" && saveCv());
-
 document.getElementById("add-portal-btn").addEventListener("click", addPortal);
 portalInput.addEventListener("keydown", e => e.key === "Enter" && addPortal());
-
 analyzeBtn.addEventListener("click", analyze);
 
 loadState();

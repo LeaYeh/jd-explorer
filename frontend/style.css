@@ -217,3 +217,17 @@ button {
 .salary { font-size: 0.875rem; color: var(--success); font-weight: 500; margin-top: 0.75rem; }
 
 .empty { color: var(--muted); font-size: 0.875rem; font-style: italic; }
+
+.progress-log {
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 0.8rem;
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.progress-entry { color: var(--muted); }
+.progress-entry.success { color: var(--success); }
+.progress-entry.error   { color: var(--danger); }
