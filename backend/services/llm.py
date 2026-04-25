@@ -1,9 +1,12 @@
 import json
 import logging
 import os
+import time
 from typing import List, Dict
 
 import anthropic
+
+from backend.metrics import LLM_DURATION, LLM_TOKENS_INPUT, LLM_TOKENS_OUTPUT, LLM_ERRORS
 
 from backend.services.scraper import fetch_page_text, fetch_all_links
 
@@ -132,12 +135,20 @@ Which of these links lead to individual job position detail pages?
 Exclude navigation, filters, login, and category pages.
 Return JSON: {{"job_links": [{{"url": "...", "title": "..."}}]}}"""
 
-    msg = await _client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        system=_JSON_ONLY,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    _t0 = time.perf_counter()
+    try:
+        msg = await _client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            system=_JSON_ONLY,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        LLM_DURATION.labels(model=msg.model, endpoint="extract_links").observe(time.perf_counter() - _t0)
+        LLM_TOKENS_INPUT.labels(model=msg.model, endpoint="extract_links").inc(msg.usage.input_tokens)
+        LLM_TOKENS_OUTPUT.labels(model=msg.model, endpoint="extract_links").inc(msg.usage.output_tokens)
+    except Exception as _e:
+        LLM_ERRORS.labels(endpoint="extract_links", error_type=type(_e).__name__).inc()
+        raise
     raw = msg.content[0].text
     log.info("[llm] _extract_job_links raw response: %s", raw[:300])
     try:
@@ -172,12 +183,20 @@ Return JSON:
   "summary": "2-sentence fit summary"
 }}"""
 
-    msg = await _client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        system=_ANALYZE_SYSTEM,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    _t0 = time.perf_counter()
+    try:
+        msg = await _client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            system=_ANALYZE_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        LLM_DURATION.labels(model=msg.model, endpoint="analyze_jd").observe(time.perf_counter() - _t0)
+        LLM_TOKENS_INPUT.labels(model=msg.model, endpoint="analyze_jd").inc(msg.usage.input_tokens)
+        LLM_TOKENS_OUTPUT.labels(model=msg.model, endpoint="analyze_jd").inc(msg.usage.output_tokens)
+    except Exception as _e:
+        LLM_ERRORS.labels(endpoint="analyze_jd", error_type=type(_e).__name__).inc()
+        raise
     raw = msg.content[0].text
     try:
         return _parse_json(raw), prompt, raw
@@ -210,12 +229,20 @@ Extract all job listings and analyze each against the CV. Return JSON:
 }}
 If no listings found, return {{"jobs": []}}."""
 
-    msg = await _client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2048,
-        system=_ANALYZE_SYSTEM,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    _t0 = time.perf_counter()
+    try:
+        msg = await _client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2048,
+            system=_ANALYZE_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        LLM_DURATION.labels(model=msg.model, endpoint="analyze_fallback").observe(time.perf_counter() - _t0)
+        LLM_TOKENS_INPUT.labels(model=msg.model, endpoint="analyze_fallback").inc(msg.usage.input_tokens)
+        LLM_TOKENS_OUTPUT.labels(model=msg.model, endpoint="analyze_fallback").inc(msg.usage.output_tokens)
+    except Exception as _e:
+        LLM_ERRORS.labels(endpoint="analyze_fallback", error_type=type(_e).__name__).inc()
+        raise
     raw = msg.content[0].text
     try:
         data = _parse_json(raw)
