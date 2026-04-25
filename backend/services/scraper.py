@@ -22,12 +22,10 @@ async def fetch_page_text(url: str, max_chars: int = 8000) -> str:
 
 
 async def fetch_all_links(portal_url: str) -> list[dict]:
-    """Return all same-domain links from the listing page — no keyword filtering."""
-    html = await _fetch_raw_html(portal_url)
-    if len(html.split()) < _JS_THRESHOLD:
-        log.info("[scraper] listing page looks JS-rendered, switching to Playwright: %s", portal_url)
-        html = await _fetch_playwright_html(portal_url)
-
+    """Return all same-domain links from the listing page — no keyword filtering.
+    Always uses Playwright so JS-rendered job links are included."""
+    log.info("[scraper] fetching listing page with Playwright: %s", portal_url)
+    html = await _fetch_playwright_html(portal_url)
     links = _extract_links(html, portal_url)
     log.info("[scraper] extracted %d candidate links from %s", len(links), portal_url)
     return links
