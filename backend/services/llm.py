@@ -28,14 +28,23 @@ async def analyze_portals_stream(cv_url: str, portal_urls: List[str]):
         yield {"type": "error", "message": "Could not read CV — make sure the URL is publicly accessible"}
         return
     yield {"type": "progress", "message": f"CV loaded ({word_count} words)"}
+    yield {"type": "progress", "message": f"[CV TEXT]\n{cv_text[:500]}..."}
 
     for portal_url in portal_urls:
         yield {"type": "progress", "message": f"Scanning portal..."}
 
         all_links = await fetch_all_links(portal_url)
         yield {"type": "progress", "message": f"Found {len(all_links)} candidate links — filtering with LLM..."}
+        for lnk in all_links:
+            yield {"type": "progress", "message": f"  {lnk['url']}"}
 
-        job_links = await _extract_job_links(all_links, portal_url) if all_links else []
+        if all_links:
+            job_links, prompt, raw = await _extract_job_links(all_links, portal_url)
+            yield {"type": "progress", "message": f"[PROMPT - extract_job_links]\n{prompt}"}
+            yield {"type": "progress", "message": f"[LLM RESPONSE - extract_job_links]\n{raw}"}
+        else:
+            job_links = []
+
         yield {"type": "progress", "message": f"Identified {len(job_links)} job pages"}
 
         if job_links:
@@ -43,7 +52,10 @@ async def analyze_portals_stream(cv_url: str, portal_urls: List[str]):
             for i, link in enumerate(job_links[:total]):
                 yield {"type": "progress", "message": f"Analyzing {i + 1}/{total}: {link['title'][:60]}"}
                 jd_text = await fetch_page_text(link["url"])
-                job = await _analyze_single_jd(cv_text, link["title"], link["url"], jd_text)
+                yield {"type": "progress", "message": f"[JD TEXT - {link['url']}]\n{jd_text[:500]}..."}
+                job, prompt, raw = await _analyze_single_jd(cv_text, link["title"], link["url"], jd_text)
+                yield {"type": "progress", "message": f"[PROMPT - analyze_single_jd]\n{prompt[:600]}..."}
+                yield {"type": "progress", "message": f"[LLM RESPONSE - analyze_single_jd]\n{raw}"}
                 if job:
                     job["portal_url"] = portal_url
                     yield {"type": "job", "data": job}
@@ -52,7 +64,9 @@ async def analyze_portals_stream(cv_url: str, portal_urls: List[str]):
         else:
             yield {"type": "progress", "message": "No job links found — analyzing listing page text directly..."}
             portal_text = await fetch_page_text(portal_url)
-            jobs = await _analyze_listing_fallback(cv_text, portal_url, portal_text)
+            jobs, prompt, raw = await _analyze_listing_fallback(cv_text, portal_url, portal_text)
+            yield {"type": "progress", "message": f"[PROMPT - listing_fallback]\n{prompt[:600]}..."}
+            yield {"type": "progress", "message": f"[LLM RESPONSE - listing_fallback]\n{raw}"}
             for job in jobs:
                 job["portal_url"] = portal_url
                 yield {"type": "job", "data": job}
@@ -61,7 +75,6 @@ async def analyze_portals_stream(cv_url: str, portal_urls: List[str]):
 
 
 async def analyze_portals(cv_url: str, portal_urls: List[str]) -> List[Dict]:
-    log.info("[llm] fetching CV from %s", cv_url)
     cv_text = await fetch_page_text(cv_url, max_chars=4000)
     log.info("[llm] CV text: %d words", len(cv_text.split()))
 
@@ -76,7 +89,7 @@ async def analyze_portals(cv_url: str, portal_urls: List[str]) -> List[Dict]:
 
 async def _analyze_portal(cv_text: str, portal_url: str) -> List[Dict]:
     all_links = await fetch_all_links(portal_url)
-    job_links = await _extract_job_links(all_links, portal_url) if all_links else []
+    job_links, _, _ = await _extract_job_links(all_links, portal_url) if all_links else ([], "", "")
     log.info("[llm] LLM identified %d job links out of %d candidates", len(job_links), len(all_links))
 
     if job_links:
@@ -84,8 +97,7 @@ async def _analyze_portal(cv_text: str, portal_url: str) -> List[Dict]:
         for i, link in enumerate(job_links[:15]):
             log.info("[llm] fetching JD %d/%d: %s", i + 1, min(len(job_links), 15), link["url"])
             jd_text = await fetch_page_text(link["url"])
-            log.info("[llm] JD text: %d words", len(jd_text.split()))
-            job = await _analyze_single_jd(cv_text, link["title"], link["url"], jd_text)
+            job, _, _ = await _analyze_single_jd(cv_text, link["title"], link["url"], jd_text)
             if job:
                 log.info("[llm] analyzed: %s → fit_score=%s", job.get("title"), job.get("fit_score"))
                 jobs.append(job)
@@ -95,10 +107,12 @@ async def _analyze_portal(cv_text: str, portal_url: str) -> List[Dict]:
 
     log.info("[llm] no job links found, falling back to listing page text")
     portal_text = await fetch_page_text(portal_url)
-    return await _analyze_listing_fallback(cv_text, portal_url, portal_text)
+    jobs, _, _ = await _analyze_listing_fallback(cv_text, portal_url, portal_text)
+    return jobs
 
 
-async def _extract_job_links(links: list[dict], portal_url: str) -> list[dict]:
+async def _extract_job_links(links: list[dict], portal_url: str) -> tuple[list[dict], str, str]:
+    """Returns (job_links, prompt, raw_response)."""
     links_text = "\n".join(f"- [{l['title']}]({l['url']})" for l in links)
 
     prompt = f"""These links were extracted from a job portal listing page: {portal_url}
@@ -119,16 +133,17 @@ Return JSON: {{"job_links": [{{"url": "...", "title": "..."}}]}}"""
     log.info("[llm] _extract_job_links raw response: %s", raw[:300])
     try:
         data = json.loads(raw)
-        return data.get("job_links", [])
+        return data.get("job_links", []), prompt, raw
     except json.JSONDecodeError as e:
         log.error("[llm] failed to parse job links JSON: %s | raw: %s", e, raw[:300])
-        return []
+        return [], prompt, raw
 
 
-async def _analyze_single_jd(cv_text: str, title: str, url: str, jd_text: str) -> Dict | None:
+async def _analyze_single_jd(cv_text: str, title: str, url: str, jd_text: str) -> tuple[Dict | None, str, str]:
+    """Returns (result, prompt, raw_response)."""
     if not jd_text.strip():
         log.warning("[llm] empty JD text for %s", url)
-        return None
+        return None, "", ""
 
     prompt = f"""CV:
 {cv_text}
@@ -156,13 +171,14 @@ Return JSON:
     )
     raw = msg.content[0].text
     try:
-        return json.loads(raw)
+        return json.loads(raw), prompt, raw
     except json.JSONDecodeError as e:
         log.error("[llm] failed to parse single JD JSON: %s | raw: %s", e, raw[:300])
-        return None
+        return None, prompt, raw
 
 
-async def _analyze_listing_fallback(cv_text: str, portal_url: str, portal_text: str) -> List[Dict]:
+async def _analyze_listing_fallback(cv_text: str, portal_url: str, portal_text: str) -> tuple[List[Dict], str, str]:
+    """Returns (jobs, prompt, raw_response)."""
     prompt = f"""CV:
 {cv_text}
 
@@ -196,7 +212,7 @@ If no listings found, return {{"jobs": []}}."""
         data = json.loads(raw)
         jobs = data.get("jobs", [])
         log.info("[llm] fallback extracted %d jobs from listing page", len(jobs))
-        return jobs
+        return jobs, prompt, raw
     except json.JSONDecodeError as e:
         log.error("[llm] failed to parse fallback JSON: %s | raw: %s", e, raw[:300])
-        return []
+        return [], prompt, raw
